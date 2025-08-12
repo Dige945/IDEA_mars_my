@@ -46,6 +46,13 @@ _C.MODEL.DA = True  # Whether to use deformable aggregation
 _C.MODEL.DA_SHARE = False  # Whether to share offsets across modalities
 _C.MODEL.OFF_FAC = 5.0  # Offset factor to control offset magnitude
 
+
+# 多尺度特征配置
+_C.MODEL.MULTI_SCALE = True  # 是否启用多尺度特征
+_C.MODEL.INTERMEDIATE_LAYER_IDX = -4  # 中间特征提取层（倒数第4层）
+_C.MODEL.SCALE_CONSISTENCY_WEIGHT = 0.4  # 尺度一致性损失权重
+
+
 # ===================== INPUT CONFIGURATION =====================
 _C.INPUT = CN()
 _C.INPUT.SIZE_TRAIN = [256, 128]  # Image size during training

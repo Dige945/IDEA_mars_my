@@ -430,6 +430,11 @@ class VisionTransformer(nn.Module):
 
         scale = width ** -0.5
         self.forward_type = cfg.MODEL.FORWARD
+
+        # 添加多尺度特征配置
+        self.multi_scale = cfg.MODEL.MULTI_SCALE
+        self.intermediate_layer_idx = cfg.MODEL.INTERMEDIATE_LAYER_IDX
+
         if self.forward_type == 'new':
             self.positional_embedding = nn.Parameter(scale * torch.randn(h_resolution * w_resolution, width))
         else:
@@ -442,6 +447,11 @@ class VisionTransformer(nn.Module):
 
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+
+        # 为中间特征添加独立的归一化和投影层
+        if self.multi_scale:
+            self.ln_intermediate = LayerNorm(width)
+            self.proj_intermediate = nn.Parameter(scale * torch.randn(width, output_dim))
 
     def forward_old(self, x: torch.Tensor, cv_emb=None, modality=None, text_inverse=None):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
@@ -459,6 +469,10 @@ class VisionTransformer(nn.Module):
             x = torch.cat([x, text_inverse.unsqueeze(1)], dim=1)
         x = self.ln_pre(x)
         x = x.permute(1, 0, 2)  # NLD -> LND
+
+        # 用于存储中间特征
+        intermediate_features = None
+
         for i in range(len(self.transformer.resblocks)):
             if self.prompt_sign and self.adapter_sign:
                 if i == 0:
@@ -479,11 +493,23 @@ class VisionTransformer(nn.Module):
             else:
                 x = self.transformer.resblocks[i](x, modality, i, None, prompt_sign=False, adapter_sign=False)
 
+
+             # 在指定的中间层提取特征
+            if self.multi_scale and i == len(self.transformer.resblocks) + self.intermediate_layer_idx:
+                x_temp = x.permute(1, 0, 2)  # LND -> NLD
+                intermediate_features = x_temp[:, 0]  # 取cls token
+                intermediate_features = self.ln_intermediate(intermediate_features)
+                if self.proj_intermediate is not None:
+                    intermediate_features = intermediate_features @ self.proj_intermediate
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_post(x)
         if self.proj is not None:
             xproj = x @ self.proj
-        return xproj
+
+        if self.multi_scale and intermediate_features is not None:
+            return xproj, intermediate_features
+        else:
+            return xproj
 
     def forward_new(self, x: torch.Tensor, text_inverse, cv_emb=None, modality=None):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
@@ -496,6 +522,10 @@ class VisionTransformer(nn.Module):
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
+
+         # 用于存储中间特征
+        intermediate_features = None
+
         for i in range(len(self.transformer.resblocks)):
             if self.prompt_sign and self.adapter_sign:
                 if i == 0:
@@ -516,11 +546,24 @@ class VisionTransformer(nn.Module):
             else:
                 x = self.transformer.resblocks[i](x, modality, i, None, prompt_sign=False, adapter_sign=False)
 
+            # 在指定的中间层提取特征
+            if self.multi_scale and i == len(self.transformer.resblocks) + self.intermediate_layer_idx:
+                x_temp = x.permute(1, 0, 2)  # LND -> NLD
+                # 对于new forward，没有cls token，使用全局平均池化
+                intermediate_features = x_temp.mean(dim=1)  # 全局平均池化
+                intermediate_features = self.ln_intermediate(intermediate_features)
+                if self.proj_intermediate is not None:
+                    intermediate_features = intermediate_features @ self.proj_intermediate
+
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_post(x)
         if self.proj is not None:
             xproj = x @ self.proj
-        return xproj
+
+        if self.multi_scale and intermediate_features is not None:
+            return xproj, intermediate_features
+        else:
+            return xproj
 
     def forward(self, x: torch.Tensor, cv_emb=None, modality=None, text_inverse=None):
         if self.forward_type == 'new':
@@ -553,6 +596,12 @@ class CLIP(nn.Module):
         self.prompt_sign = cfg.MODEL.PROMPT
         self.adapter_sign = cfg.MODEL.ADAPTER
         self.pattern = ['nothing']
+
+
+
+        # new
+        self.multi_scale = cfg.MODEL.MULTI_SCALE
+
         if self.prompt_sign:
             self.pattern.append('prompt')
         if self.adapter_sign:
@@ -656,7 +705,17 @@ class CLIP(nn.Module):
         return self.visual.conv1.weight.dtype
 
     def encode_image(self, image, cv_embed, modality, text_inverse=None):
-        return self.visual(image.type(self.dtype), cv_embed, modality, text_inverse)
+        result =  self.visual(image.type(self.dtype), cv_embed, modality, text_inverse)
+
+        if self.multi_scale:
+            if isinstance(result, tuple) and len(result) == 2:
+                return result  # (final_features, intermediate_features)
+            else:
+                # 如果没有中间特征，复制最终特征作为中间特征
+                return result, result
+        else:
+            return result
+        
 
     def encode_text(self, text, modality=None,image_inverse=None):
         x = self.token_embedding(text).type(self.dtype)
@@ -698,7 +757,15 @@ class CLIP(nn.Module):
         return x
 
     def forward(self, image, text, cv_embed, modality):
-        image_features = self.encode_image(image, cv_embed, modality)
+        image_result = self.encode_image(image, cv_embed, modality)
+
+
+        # 处理多尺度特征
+        if isinstance(image_result, tuple):
+            image_features, intermediate_features = image_result
+        else:
+            image_features = image_result
+            intermediate_features = None
         text_features = self.encode_text(text)
 
         # normalized features
@@ -711,8 +778,11 @@ class CLIP(nn.Module):
         logits_per_text = logit_scale * text_features @ image_features.t()
 
         # shape = [global_batch_size, global_batch_size]
-        return logits_per_image, logits_per_text
-
+        # 如果有中间特征，也一起返回
+        if intermediate_features is not None:
+            return logits_per_image, logits_per_text, image_features, intermediate_features
+        else:
+            return logits_per_image, logits_per_text
 
 def convert_weights(model: nn.Module):
     """Convert applicable model parameters to fp16"""

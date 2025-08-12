@@ -11,6 +11,7 @@ from .center_loss import CenterLoss
 from .sdm_loss import compute_sdm
 from .cmpc_loss import compute_cmpm
 from .itc_loss import compute_itc
+from .scale_consistency_loss import compute_scale_consistency_loss
 
 def make_loss(cfg, num_classes):  # modified by gu
     sampler = cfg.DATALOADER.SAMPLER
@@ -37,7 +38,7 @@ def make_loss(cfg, num_classes):  # modified by gu
             return F.cross_entropy(score, target)
 
     elif cfg.DATALOADER.SAMPLER == 'softmax_triplet':
-        def loss_func(score, feat, target, target_cam, image_features=None, text_features=None, image_id=None):
+        def loss_func(score, feat, target, target_cam, image_features=None, text_features=None, image_id=None, intermediate_features=None):
             if cfg.MODEL.METRIC_LOSS_TYPE == 'triplet':
                 if cfg.MODEL.IF_LABELSMOOTH == 'on':
                     if isinstance(score, list):
@@ -60,11 +61,22 @@ def make_loss(cfg, num_classes):  # modified by gu
                     CMPC_LOSS = compute_cmpm(image_features, text_features,target)
 
                     ITC_LOSS = compute_itc(image_features, text_features, logit_scale)
+
+                    # 计算多尺度一致性损失
+                    SCALE_CONSISTENCY_LOSS = torch.tensor(0.0, device=feat.device if not isinstance(feat, list) else feat[0].device)
+
+                    if intermediate_features is not None:
+                        if isinstance(feat, list):
+                            # 如果feat是列表，取第一个作为主要特征
+                            SCALE_CONSISTENCY_LOSS = compute_scale_consistency_loss(feat[0], intermediate_features)
+                        else:
+                            SCALE_CONSISTENCY_LOSS = compute_scale_consistency_loss(feat, intermediate_features)
                     return cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + \
                         cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS + \
                         cfg.MODEL.SDM_LOSS_WEIGHT * SDM_LOSS  + \
                         cfg.MODEL.CMPC_LOSS_WEIGHT * CMPC_LOSS + \
-                        cfg.MODEL.ITC_LOSS_WEIGHT * ITC_LOSS
+                        cfg.MODEL.ITC_LOSS_WEIGHT * ITC_LOSS + \
+                        cfg.MODEL.SCALE_CONSISTENCY_WEIGHT * SCALE_CONSISTENCY_LOSS
                 else:
                     if isinstance(score, list):
                         ID_LOSS = [F.cross_entropy(scor, target) for scor in score[1:]]
@@ -86,11 +98,23 @@ def make_loss(cfg, num_classes):  # modified by gu
                     CMPC_LOSS = compute_cmpm(image_features, text_features,target)
 
                     ITC_LOSS = compute_itc(image_features, text_features, logit_scale)
+
+                    # 计算多尺度一致性损失
+                    SCALE_CONSISTENCY_LOSS = torch.tensor(0.0, device=feat.device if not isinstance(feat, list) else feat[0].device)
+
+                    if intermediate_features is not None:
+                        if isinstance(feat, list):
+                            # 如果feat是列表，取第一个作为主要特征
+                            SCALE_CONSISTENCY_LOSS = compute_scale_consistency_loss(feat[0], intermediate_features, scale_consistency_weight)
+                        else:
+                            SCALE_CONSISTENCY_LOSS = compute_scale_consistency_loss(feat, intermediate_features, scale_consistency_weight)
+
                     return cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + \
                         cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS + \
                         cfg.MODEL.SDM_LOSS_WEIGHT * SDM_LOSS  + \
                         cfg.MODEL.CMPC_LOSS_WEIGHT * CMPC_LOSS + \
-                        cfg.MODEL.ITC_LOSS_WEIGHT * ITC_LOSS
+                        cfg.MODEL.ITC_LOSS_WEIGHT * ITC_LOSS + \
+                        cfg.MODEL.SCALE_CONSISTENCY_WEIGHT * SCALE_CONSISTENCY_LOSS
                         
             else:
                 print('expected METRIC_LOSS_TYPE should be triplet'

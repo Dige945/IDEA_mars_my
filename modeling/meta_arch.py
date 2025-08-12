@@ -41,6 +41,13 @@ class build_transformer(nn.Module):
         self.model_name = cfg.MODEL.TRANSFORMER_TYPE
         self.direct = cfg.MODEL.DIRECT
         self.fowrard_type = cfg.MODEL.FORWARD
+
+        # 多尺度特征配置
+        self.multi_scale = cfg.MODEL.MULTI_SCALE
+        
+
+        
+
         if self.fowrard_type == 'new':
             print('using new forward')
             self.pooling = nn.AdaptiveAvgPool1d(1)
@@ -115,7 +122,15 @@ class build_transformer(nn.Module):
             text_features, text_inverse, global_feat_text = None, None, None
 
         # 计算图像特征 
-        image_features = self.base.encode_image(image, cv_embed, modality, text_inverse=text_inverse) #(64，130，512)
+        image_result = self.base.encode_image(image, cv_embed, modality, text_inverse=text_inverse) #(64，130，512)
+
+        # 处理多尺度特征
+        if self.multi_scale and isinstance(image_result, tuple):
+            image_features, intermediate_features = image_result
+        else:
+            image_features = image_result if not isinstance(image_result, tuple) else image_result[0]
+            intermediate_features = None
+        
         global_feat_img = image_features[:, 0]
 
         # 处理文本特征的全局表示
@@ -127,20 +142,31 @@ class build_transformer(nn.Module):
 
         # 返回特征
         return_values = image_features[:, 1:-1] if self.inverse else image_features[:, 1:]
-        return return_values, global_feat_img, text_features, global_feat_txt
-    #        (64，128，512)      (64,512)        (64,77,512)     (64,512)
+        if intermediate_features is not None:
+            return return_values, global_feat_img, text_features, global_feat_txt, intermediate_features
+        else:
+            return return_values, global_feat_img, text_features, global_feat_txt
+    #             (64，128，512)      (64,512)        (64,77,512)     (64,512)
     def forward_image(self, image, label=None, cam_label=None, view_label=None, modality=None):
         # 计算可见光特征嵌入
         cv_embed = self.sie_xishu * self.cv_embed[cam_label] if self.cv_embed_sign else None
 
         # 计算图像特征 
-        image_features = self.base.encode_image(image, cv_embed, modality, text_inverse=None) #(64，130，512)
-        global_feat_img = image_features[:, 0]
-
+        image_result = self.base.encode_image(image, cv_embed, modality, text_inverse=None) #(64，130，512)
+         # 处理多尺度特征
+        if self.multi_scale and isinstance(image_result, tuple):
+            image_features, intermediate_features = image_result
+            global_feat_img = image_features[:, 0]
+            return image_features, global_feat_img, intermediate_features
+        else:
+            image_features = image_result if not isinstance(image_result, tuple) else image_result[0]
+            global_feat_img = image_features[:, 0]
+            return image_features, global_feat_img
+            #        (64，128，512)      (64,512)        (64,77,512)     (64,512)
         # 返回特征
         # return_values = image_features[:, 1:] 
-        return image_features, global_feat_img
-    #        (64，128，512)      (64,512)        (64,77,512)     (64,512)
+        
+
     def forward_text(self, text=None, label=None, cam_label=None, view_label=None, modality=None):
         text_features = self.base.encode_text(text, modality)
         global_feat_text = text_features[torch.arange(text_features.shape[0]), text.argmax(dim=-1)]

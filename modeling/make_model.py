@@ -35,6 +35,10 @@ class IDEA(nn.Module):
         self.q_size = cfg.INPUT.SIZE_TRAIN[0] // 16, cfg.INPUT.SIZE_TRAIN[1] // 16
         self.window_size = self.q_size
         self.stride_block = self.q_size
+
+        # 多尺度特征配置
+        self.multi_scale = cfg.MODEL.MULTI_SCALE
+
         if self.DA:
             self.CDA = CDA(q_size=self.q_size, window_size=self.q_size, ksize=4,
                                                                stride=2,
@@ -75,6 +79,14 @@ class IDEA(nn.Module):
             self.bottleneck_t = nn.BatchNorm1d( self.feat_dim)
             self.bottleneck_t.bias.requires_grad_(False)
             self.bottleneck_t.apply(weights_init_kaiming)
+
+             # 为多尺度一致性添加中间特征处理层
+            if self.multi_scale:
+                self.fusion_v_intermediate = nn.Linear(3 * self.feat_dim, self.feat_dim, bias=False)
+                self.fusion_v_intermediate.apply(weights_init_classifier)
+                self.bottleneck_fusion_v_intermediate = nn.BatchNorm1d(3 * self.feat_dim)
+                self.bottleneck_fusion_v_intermediate.bias.requires_grad_(False)
+                self.bottleneck_fusion_v_intermediate.apply(weights_init_kaiming)
         else:
             self.classifier_t_rgb = nn.Linear(self.feat_dim, self.num_classes, bias=False)
             self.classifier_t_rgb.apply(weights_init_classifier)
@@ -173,10 +185,28 @@ class IDEA(nn.Module):
             NI = image['NI']
             TI = image['TI']
             
-            RGB_v_feas, RGB_v_global = self.BACKBONE.forward_image(image=RGB, cam_label=cam_label, label=label,view_label=view_label)
-            NI_v_feas, NI_v_global = self.BACKBONE.forward_image(image=NI, cam_label=cam_label, label=label,view_label=view_label)
-            TI_v_feas, TI_v_global = self.BACKBONE.forward_image(image=TI, cam_label=cam_label, label=label,view_label=view_label)
-            RGB_t_feas, RGB_t_global = self.BACKBONE.forward_text(text=RGB_Text, cam_label=cam_label, label=label,view_label=view_label)
+            # RGB_v_feas, RGB_v_global = self.BACKBONE.forward_image(image=RGB, cam_label=cam_label, label=label,view_label=view_label)
+            # NI_v_feas, NI_v_global = self.BACKBONE.forward_image(image=NI, cam_label=cam_label, label=label,view_label=view_label)
+            # TI_v_feas, TI_v_global = self.BACKBONE.forward_image(image=TI, cam_label=cam_label, label=label,view_label=view_label)
+            # RGB_t_feas, RGB_t_global = self.BACKBONE.forward_text(text=RGB_Text, cam_label=cam_label, label=label,view_label=view_label)
+
+            # 获取图像特征（可能包含多尺度特征）
+            RGB_v_results = self.BACKBONE.forward_image(image=RGB, cam_label=cam_label, label=label, view_label=view_label)
+            NI_v_results = self.BACKBONE.forward_image(image=NI, cam_label=cam_label, label=label, view_label=view_label)
+            TI_v_results = self.BACKBONE.forward_image(image=TI, cam_label=cam_label, label=label, view_label=view_label)
+            RGB_t_results = self.BACKBONE.forward_text(text=RGB_Text, cam_label=cam_label, label=label, view_label=view_label)
+
+            # 提取最终特征
+            RGB_v_feas, RGB_v_global = RGB_v_results[:2]
+            NI_v_feas, NI_v_global = NI_v_results[:2]
+            TI_v_feas, TI_v_global = TI_v_results[:2]
+            RGB_t_feas, RGB_t_global = RGB_t_results[:2]
+            
+            # 提取中间特征（如果有的话）
+            RGB_v_intermediate = RGB_v_results[2] if len(RGB_v_results) > 2 else None
+            NI_v_intermediate = NI_v_results[2] if len(NI_v_results) > 2 else None
+            TI_v_intermediate = TI_v_results[2] if len(TI_v_results) > 2 else None
+
             if self.direct:
                 ori_v = torch.cat([RGB_v_global, NI_v_global, TI_v_global], dim=-1)
                 # ori_t = torch.cat([RGB_t_global, NI_t_global, TI_t_global], dim=-1)
@@ -184,7 +214,21 @@ class IDEA(nn.Module):
                 fusion_v = self.fusion_v(self.bottleneck_fusion_v(ori_v))
                 score_v = self.classifier_v(self.bottleneck_v(fusion_v))
                 score_t = self.classifier_t(self.bottleneck_t(ori_t))
-                return score_v, fusion_v, score_t, ori_t
+                # 处理中间特征（如果启用多尺度且有中间特征）
+                fusion_v_intermediate = None
+                if self.multi_scale and all(x is not None for x in [RGB_v_intermediate, NI_v_intermediate, TI_v_intermediate]):
+                    # 从中间特征中提取全局特征（类似于global_feat_img的提取）
+                    RGB_v_global_intermediate = RGB_v_intermediate[:, 0] if RGB_v_intermediate.dim() > 2 else RGB_v_intermediate
+                    NI_v_global_intermediate = NI_v_intermediate[:, 0] if NI_v_intermediate.dim() > 2 else NI_v_intermediate
+                    TI_v_global_intermediate = TI_v_intermediate[:, 0] if TI_v_intermediate.dim() > 2 else TI_v_intermediate
+                    
+                    ori_v_intermediate = torch.cat([RGB_v_global_intermediate, NI_v_global_intermediate, TI_v_global_intermediate], dim=-1)
+                    fusion_v_intermediate = self.fusion_v_intermediate(self.bottleneck_fusion_v_intermediate(ori_v_intermediate))
+                # 返回结果，包含中间特征（如果有）
+                if fusion_v_intermediate is not None:
+                    return score_v, fusion_v, score_t, ori_t, fusion_v_intermediate
+                else:
+                    return score_v, fusion_v, score_t, ori_t
             else:
                 score_rgb_t = self.classifier_t_rgb(self.bottleneck_t_rgb(RGB_t_global))
                 score_nir_t = self.classifier_t_nir(self.bottleneck_t_nir(NI_t_global))
@@ -220,10 +264,17 @@ class IDEA(nn.Module):
             #                         [RGB_v_global, NI_v_global, TI_v_global, RGB_t_global, NI_t_global, TI_t_global],
             #                         dim=-1)}
 
-            RGB_v_feas, RGB_v_global = self.BACKBONE.forward_image(image=RGB, cam_label=cam_label, label=label,view_label=view_label)
-            NI_v_feas, NI_v_global = self.BACKBONE.forward_image(image=NI, cam_label=cam_label, label=label,view_label=view_label)
-            TI_v_feas, TI_v_global = self.BACKBONE.forward_image(image=TI, cam_label=cam_label, label=label,view_label=view_label)
-            RGB_t_feas, RGB_t_global = self.BACKBONE.forward_text(text=RGB_Text, cam_label=cam_label, label=label,view_label=view_label)
+             # 获取图像特征（可能包含多尺度特征）
+            RGB_v_results = self.BACKBONE.forward_image(image=RGB, cam_label=cam_label, label=label, view_label=view_label)
+            NI_v_results = self.BACKBONE.forward_image(image=NI, cam_label=cam_label, label=label, view_label=view_label)
+            TI_v_results = self.BACKBONE.forward_image(image=TI, cam_label=cam_label, label=label, view_label=view_label)
+            RGB_t_results = self.BACKBONE.forward_text(text=RGB_Text, cam_label=cam_label, label=label, view_label=view_label)
+        
+             # 提取最终特征
+            RGB_v_feas, RGB_v_global = RGB_v_results[:2]
+            NI_v_feas, NI_v_global = NI_v_results[:2]
+            TI_v_feas, TI_v_global = TI_v_results[:2]
+            RGB_t_feas, RGB_t_global = RGB_t_results[:2]
             
             ori_v = torch.cat([RGB_v_global, NI_v_global, TI_v_global], dim=-1)
             fusion_v = self.fusion_v(self.bottleneck_fusion_v(ori_v))

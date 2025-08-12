@@ -70,7 +70,14 @@ def do_train(cfg,
                 output = model(image=img, text=text, label=target, cam_label=target_cam, view_label=target_view,
                                writer=writer, epoch=epoch, img_path=img_path)
                 
-
+                # 检查是否有中间特征（多尺度特征）
+                intermediate_features = None
+                if len(output) > 4:  # 如果输出长度大于4，说明可能有中间特征
+                    # 检查最后一个元素是否是中间特征
+                    if torch.is_tensor(output[-1]) and output[-1].dim() == 2:  # 假设中间特征是2D tensor
+                        intermediate_features = output[-1]
+                        output = output[:-1]  # 移除中间特征，保持原有的处理逻辑
+                
                 # 从output中提取图像和文本特征用于SDM
                 # 根据IDEA模型的输出结构，通常图像特征在output中
                 image_features = output[1]  # fusion_v
@@ -82,7 +89,8 @@ def do_train(cfg,
                         loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam,
                                                                     image_features=image_features,
                                                                      text_features=text_features,
-                                                                     image_id=None)
+                                                                     image_id=None,
+                                                                     intermediate_features=intermediate_features) # 传递中间特征
                         loss = loss + loss_tmp
                     if not isinstance(output[-1], dict):
                         loss = loss + output[-1]
@@ -94,13 +102,15 @@ def do_train(cfg,
                                                                      target=target, target_cam=target_cam,
                                                                      image_features=image_features,
                                                                      text_features=text_features,
-                                                                     image_id=None)
+                                                                     image_id=None,
+                                                                     intermediate_features=intermediate_features)# 传递中间特征
                 else:
                     for i in range(0, len(output), 2):
                         loss_tmp = loss_fn(score=output[i], feat=output[i + 1], target=target, target_cam=target_cam,
                                                                      image_features=image_features,
                                                                      text_features=text_features,
-                                                                     image_id=None)
+                                                                     image_id=None,
+                                                                     intermediate_features=intermediate_features)# 传递中间特征
                         loss = loss + loss_tmp
             scaler.scale(loss).backward()
             scaler.step(optimizer)
